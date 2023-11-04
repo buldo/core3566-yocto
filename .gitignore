@@ -1,0 +1,17 @@
+poky/
+
+cache/
+tmp/
+sstate-cache/
+downloads/
+
+bitbake-cookerdaemon.log
+rockchip-202311020351-sda.direct*
+debugfs_script
+fstab
+
+meta-arm/
+meta-arm
+
+meta-openembedded/
+meta-openembedded
