@@ -19,17 +19,26 @@ GPTIMG_APPEND:rk3566 = "console=tty1 console=ttyFIQ0,1500000n8 rw \
 GPTIMG_APPEND:rk3568 = "console=tty1 console=ttyFIQ0,1500000n8 rw \
 	root=PARTUUID=b921b045-1d rootfstype=ext4 init=/sbin/init rootwait"
 
-# default partitions [in Sectors]
-# More info at http://rockchip.wikidot.com/partitions
-LOADER1_SIZE = "8000"
-RESERVED1_SIZE = "128"
-RESERVED2_SIZE = "8192"
-LOADER2_SIZE = "8192"
-ATF_SIZE = "8192"
-BOOT_SIZE = "229376"
-
+# from http://opensource.rock-chips.com/wiki_Partitions
 LOADER1_START = "64"
+LOADER1_SIZE  = "7104"
+LOADER1_END   = "7167"
+
 LOADER2_START = "16384"
+LOADER2_SIZE  = "8192"
+LOADER2_END   = "24575"
+
+TRUST_START   = "24576"
+TRUST_SIZE    = "8192"
+TRUST_END     = "32767"
+
+BOOT_START    = "32768"
+BOOT_SIZE     = "229376"
+BOOT_END      = "262143"
+BOOT_SIZE_FAT = "114688"
+
+ROOTFS_START  = "262144"
+
 
 # WORKROUND: miss recipeinfo
 do_image:rockchip-gpt-img[depends] += " \
@@ -49,6 +58,9 @@ PER_CHIP_IMG_GENERATION_COMMAND_rk3566 = "generate_rk3566_loader_image"
 PER_CHIP_IMG_GENERATION_COMMAND_rk3568 = "generate_rk3568_loader_image"
 
 IMAGE_CMD:rockchip-gpt-img () {
+	bbwarn "DEPLOY_DIR_IMAGE ${DEPLOY_DIR_IMAGE}"
+	bbwarn "WORKDIR ${WORKDIR}"
+
 	# Change to image directory
 	cd ${DEPLOY_DIR_IMAGE}
 
@@ -58,25 +70,20 @@ IMAGE_CMD:rockchip-gpt-img () {
 
 	create_rk_image
 
-	${PER_CHIP_IMG_GENERATION_COMMAND}
-
 	cd ${DEPLOY_DIR_IMAGE}
-	if [ -f ${WORKDIR}/${BOOT_IMG} ]; then
-		cp ${WORKDIR}/${BOOT_IMG} ./
+	if [ -f ${WORKDIR}/${GPTIMG} ]; then
+		cp ${WORKDIR}/${GPTIMG} ./
 	fi
 }
 
 create_rk_image () {
-
 	# last dd rootfs will extend gpt image to fit the size,
 	# but this will overrite the backup table of GPT
 	# will cause corruption error for GPT
 	IMG_ROOTFS_SIZE=$(stat -L --format="%s" ${IMG_ROOTFS})
-
-	GPTIMG_MIN_SIZE=$(expr $IMG_ROOTFS_SIZE + \( ${LOADER1_SIZE} + ${RESERVED1_SIZE} + ${RESERVED2_SIZE} + ${LOADER2_SIZE} + ${ATF_SIZE} + ${BOOT_SIZE} + 35 \) \* 512 )
-
-	GPT_IMAGE_SIZE=$(expr $GPTIMG_MIN_SIZE \/ 1024 \/ 1024 + 2)
-
+	GPTIMG_MIN_SIZE=$(expr $IMG_ROOTFS_SIZE + \( ${ROOTFS_START} + 63 \) \* 512 )
+	GPT_IMAGE_SIZE=$(expr $GPTIMG_MIN_SIZE \/ 1024 \/ 1024 + 10)
+	
 	# Initialize sdcard image file
 	dd if=/dev/zero of=${GPTIMG} bs=1M count=0 seek=$GPT_IMAGE_SIZE
 
@@ -84,53 +91,25 @@ create_rk_image () {
 	parted -s ${GPTIMG} mklabel gpt
 
 	# Create vendor defined partitions
-	LOADER1_START=64
-	RESERVED1_START=$(expr ${LOADER1_START} + ${LOADER1_SIZE})
-	RESERVED2_START=$(expr ${RESERVED1_START} + ${RESERVED1_SIZE})
-	LOADER2_START=$(expr ${RESERVED2_START} + ${RESERVED2_SIZE})
-	ATF_START=$(expr ${LOADER2_START} + ${LOADER2_SIZE})
-	BOOT_START=$(expr ${ATF_START} + ${ATF_SIZE})
-	ROOTFS_START=$(expr ${BOOT_START} + ${BOOT_SIZE})
-
- 	# Make 5 partitions only for rocki-4b 
-	if [ "${SOC_FAMILY}" = "rk3399" ]; then
-
-		parted -s ${GPTIMG} unit s mkpart loader1 ${LOADER1_START} $(expr ${RESERVED1_START} - 1)
-		# parted -s ${GPTIMG} unit s mkpart reserved1 ${RESERVED1_START} $(expr ${RESERVED2_START} - 1)
-		# parted -s ${GPTIMG} unit s mkpart reserved2 ${RESERVED2_START} $(expr ${LOADER2_START} - 1)
-		parted -s ${GPTIMG} unit s mkpart loader2 ${LOADER2_START} $(expr ${ATF_START} - 1)
-		parted -s ${GPTIMG} unit s mkpart trust ${ATF_START} $(expr ${BOOT_START} - 1)	
-		BOOT_PART=4
-		ROOT_PART=5
-	else
-		BOOT_PART=1
-		ROOT_PART=2
-	fi
-
-	# Create boot partition and mark it as bootable
-	parted -s ${GPTIMG} unit s mkpart boot ${BOOT_START} $(expr ${ROOTFS_START} - 1)
-	parted -s ${GPTIMG} set ${BOOT_PART} boot on
-
-	# Create rootfs partition
-	parted -s ${GPTIMG} -- unit s mkpart rootfs ${ROOTFS_START} -34s
+	parted -s ${GPTIMG} unit s mkpart loader1 ${LOADER1_START} ${LOADER1_END}
+	parted -s ${GPTIMG} unit s mkpart loader2 ${LOADER2_START} ${LOADER2_END}
+	parted -s ${GPTIMG} unit s mkpart trust   ${TRUST_START}   ${TRUST_END}
+	parted -s ${GPTIMG} unit s mkpart boot    ${BOOT_START}    ${BOOT_END}
+	parted -s ${GPTIMG} set 4 boot on
+	parted -s ${GPTIMG} unit s mkpart rootfs  ${ROOTFS_START} 100%
 
 	parted ${GPTIMG} print
+	
+	# Write loader1 (idbloader.img)
+	dd if=${DEPLOY_DIR_IMAGE}/${IDBLOADER} of=${GPTIMG} conv=notrunc,fsync seek=${LOADER1_START}
 
-	# mark the boot partition as UEFI boot
-	BOOT_UUID="C12A7328-F81F-11D2-BA4B-00A0C93EC93B"
+	# Write loader2 (u-boot.itb)
+	dd if=${DEPLOY_DIR_IMAGE}/${UBOOT_ITB} of=${GPTIMG} conv=notrunc,fsync seek=${LOADER2_START}
 
-	# Change boot partuuid
-	gdisk ${GPTIMG} <<EOF
-x
-c
-${BOOT_PART}
-${BOOT_UUID}
-w
-y
-EOF
-
+	# START change UUID for root ----------------------------------------------
+	
 	# the root partition is always this, because aarch64
-
+	ROOT_PART=5
 	ROOT_UUID="B921B045-1DF0-41C3-AF44-4C6F280D3FAE"
 
 	# Change rootfs partuuid
@@ -142,19 +121,22 @@ ${ROOT_UUID}
 w
 y
 EOF
+	# END change UUID for root ------------------------------------------------
+
+	# START Creating and writing boot partition -------------------------------
 
 	# Delete the boot image to avoid trouble with the build cache
 	rm -f ${WORKDIR}/${BOOT_IMG}
+
 	# Create boot partition image
-	BOOT_BLOCKS=$(LC_ALL=C parted -s ${GPTIMG} unit b print | awk "/ ${BOOT_PART} / { print substr(\$4, 1, length(\$4 -1)) / 512 /2 }")
-	BOOT_BLOCKS=$(expr $BOOT_BLOCKS / 63 \* 63)
-
-	mkfs.vfat -n "boot" -S 512 -C ${WORKDIR}/${BOOT_IMG} $BOOT_BLOCKS
+	mkfs.vfat -n "boot" -S 512 -C ${WORKDIR}/${BOOT_IMG} ${BOOT_SIZE_FAT}
 	mcopy -i ${WORKDIR}/${BOOT_IMG} -s ${DEPLOY_DIR_IMAGE}/${KERNEL_IMAGETYPE}-${MACHINE}.bin ::${KERNEL_IMAGETYPE}
-	DTB_NAME=""
-	DTB_NAME=$(echo "${KERNEL_DEVICETREE}" | cut -d '/' -f 2)
 
-	mcopy -i ${WORKDIR}/${BOOT_IMG} -s ${DEPLOY_DIR_IMAGE}/${DTB_NAME} ::${DTB_NAME}
+	DEVICETREE_DEFAULT=""
+	for DTS_FILE in ${KERNEL_DEVICETREE}; do
+		[ -n "${DEVICETREE_DEFAULT}"] && DEVICETREE_DEFAULT="${DTS_FILE}"
+		mcopy -i ${WORKDIR}/${BOOT_IMG} -s ${DEPLOY_DIR_IMAGE}/${DTS_FILE} ::$(basename ${DTS_FILE})
+	done
 
 	# Create extlinux config file
 	cat >${WORKDIR}/extlinux.conf <<EOF
@@ -162,7 +144,7 @@ default Yocto
 
 label Yocto
 	kernel /${KERNEL_IMAGETYPE}
-	devicetree /${DTB_NAME}
+	devicetree /$(basename ${DEVICETREE_DEFAULT})
 	append ${GPTIMG_APPEND}
 EOF
 
@@ -184,20 +166,13 @@ EOF
 	# Burn Boot Partition
 	dd if=${WORKDIR}/${BOOT_IMG} of=${GPTIMG} conv=notrunc,fsync seek=${BOOT_START}
 
-	# Burn Rootfs Partition
-	dd if=${IMG_ROOTFS} of=${GPTIMG} conv=notrunc,fsync seek=${ROOTFS_START}
+	# END Creating and writing boot partition ---------------------------------
 
+	# Burn Rootfs Partition
+	dd if=${IMG_ROOTFS} of=${GPTIMG} seek=${ROOTFS_START}
 }
 
 generate_rk3566_loader_image () {
-	LOADER1_START=64
-	RESERVED1_START=$(expr ${LOADER1_START} + ${LOADER1_SIZE})
-	RESERVED2_START=$(expr ${RESERVED1_START} + ${RESERVED1_SIZE})
-	LOADER2_START=$(expr ${RESERVED2_START} + ${RESERVED2_SIZE})
-	ATF_START=$(expr ${LOADER2_START} + ${LOADER2_SIZE})
-	BOOT_START=$(expr ${ATF_START} + ${ATF_SIZE})
-	ROOTFS_START=$(expr ${BOOT_START} + ${BOOT_SIZE})
-
 	dd if=${DEPLOY_DIR_IMAGE}/${IDBLOADER} of=${GPTIMG} conv=notrunc,fsync seek=${LOADER1_START}
 	dd if=${DEPLOY_DIR_IMAGE}/${UBOOT_ITB} of=${GPTIMG} conv=notrunc,fsync seek=${LOADER2_START}
 }
